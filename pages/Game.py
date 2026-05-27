@@ -24,11 +24,24 @@ RECORD_INTERVAL  = 0.067   # ~15 fps — matches training data collection cadenc
 
 
 def _classify_jz_motion(sequence):
-    """Heuristic: Z has ≥2 horizontal direction reversals with wide x-range; J is everything else."""
-    FTX, FTY   = 16, 17
-    NOISE      = 0.015
-    xs = [frame[FTX] for frame in sequence]
+    """Fallback heuristic using raw wrist trajectory (indices 42-43).
+    J sweeps mostly downward; Z sweeps horizontally with direction reversals."""
+    WRIST_X, WRIST_Y = 42, 43
+    NOISE = 0.012
+
+    valid = [f for f in sequence if len(f) > WRIST_X and
+             not (f[WRIST_X] == 0.0 and f[WRIST_Y] == 0.0)]
+    if len(valid) < 4:
+        return 'J'
+
+    xs = [f[WRIST_X] for f in valid]
+    ys = [f[WRIST_Y] for f in valid]
     x_range = max(xs) - min(xs)
+    y_range = max(ys) - min(ys)
+
+    if y_range > x_range * 1.2:
+        return 'J'
+
     reversals = 0
     prev_dir  = None
     for i in range(1, len(xs)):
@@ -38,7 +51,8 @@ def _classify_jz_motion(sequence):
             if prev_dir is not None and d != prev_dir:
                 reversals += 1
             prev_dir = d
-    return 'Z' if (reversals >= 2 and x_range > 0.20) else 'J'
+
+    return 'Z' if (reversals >= 2 and x_range > 0.12) else 'J'
 
 
 def _calc_landmark_list(image, landmarks):
@@ -123,6 +137,9 @@ class DynamicGestureProcessor(VideoProcessorBase):
         if results.multi_hand_landmarks:
             lm_list   = _calc_landmark_list(img, results.multi_hand_landmarks[0])
             processed = _pre_process_landmark(lm_list)
+            # Append raw wrist position (indices 42, 43) for motion-based fallback
+            h, w = img.shape[:2]
+            processed = processed + [lm_list[0][0] / w, lm_list[0][1] / h]
             mp.solutions.drawing_utils.draw_landmarks(
                 img, results.multi_hand_landmarks[0],
                 mp.solutions.hands.HAND_CONNECTIONS)
@@ -131,7 +148,7 @@ class DynamicGestureProcessor(VideoProcessorBase):
         with self._lock:
             if self._recording and now - self._last_t >= RECORD_INTERVAL:
                 self._last_t = now
-                self._seq.append(processed if processed is not None else [0.0] * 42)
+                self._seq.append(processed if processed is not None else [0.0] * 44)
                 if len(self._seq) >= SEQUENCE_LENGTH:
                     self._recording = False
                     classify_now    = True
@@ -157,7 +174,8 @@ class DynamicGestureProcessor(VideoProcessorBase):
             cv2.putText(img, "Ready — press 'Record Gesture'",
                         (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (160, 160, 160), 1)
 
-        cv2.putText(img, "Motion classifier: ON", (10, img.shape[0] - 10),
+        classifier_tag = "TFLite" if self._classifier is not None else "heuristic"
+        cv2.putText(img, f"Classifier: {classifier_tag}", (10, img.shape[0] - 10),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 180, 0), 1)
 
         return av.VideoFrame.from_ndarray(img, format="bgr24")
@@ -165,7 +183,21 @@ class DynamicGestureProcessor(VideoProcessorBase):
     def _run_classify(self):
         if len(self._seq) < SEQUENCE_LENGTH:
             return
-        label = _classify_jz_motion(self._seq[:SEQUENCE_LENGTH])
+
+        seq = self._seq[:SEQUENCE_LENGTH]
+        label = None
+
+        # Use the trained TFLite model (trim to 42 dims — model doesn't need wrist coords)
+        if self._classifier is not None:
+            seq42 = [f[:42] for f in seq]
+            class_id = self._classifier(seq42)
+            if 0 <= class_id < len(self._labels):
+                label = self._labels[class_id]
+
+        # Fall back to motion heuristic if model unavailable or not confident
+        if label is None:
+            label = _classify_jz_motion(seq)
+
         with self._lock:
             self._result = label
 
