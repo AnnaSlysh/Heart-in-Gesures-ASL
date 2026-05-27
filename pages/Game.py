@@ -20,7 +20,25 @@ import mediapipe as mp
 
 DYNAMIC_LETTERS  = frozenset('JZ')
 SEQUENCE_LENGTH  = 16
-RECORD_INTERVAL  = 0.13    # ~7.7 fps — matches training data collection cadence
+RECORD_INTERVAL  = 0.067   # ~15 fps — matches training data collection cadence
+
+
+def _classify_jz_motion(sequence):
+    """Heuristic: Z has ≥2 horizontal direction reversals with wide x-range; J is everything else."""
+    FTX, FTY   = 16, 17
+    NOISE      = 0.015
+    xs = [frame[FTX] for frame in sequence]
+    x_range = max(xs) - min(xs)
+    reversals = 0
+    prev_dir  = None
+    for i in range(1, len(xs)):
+        dx = xs[i] - xs[i - 1]
+        if abs(dx) > NOISE:
+            d = 1 if dx > 0 else -1
+            if prev_dir is not None and d != prev_dir:
+                reversals += 1
+            prev_dir = d
+    return 'Z' if (reversals >= 2 and x_range > 0.20) else 'J'
 
 
 def _calc_landmark_list(image, landmarks):
@@ -139,24 +157,17 @@ class DynamicGestureProcessor(VideoProcessorBase):
             cv2.putText(img, "Ready — press 'Record Gesture'",
                         (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (160, 160, 160), 1)
 
-        badge = "LSTM: OK" if self._classifier else \
-                f"LSTM: FAIL [{(self._load_error or '')[:35]}]"
-        color = (0, 180, 0) if self._classifier else (0, 0, 220)
-        cv2.putText(img, badge, (10, img.shape[0] - 10),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1)
+        cv2.putText(img, "Motion classifier: ON", (10, img.shape[0] - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 180, 0), 1)
 
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
     def _run_classify(self):
-        if self._classifier is None or len(self._seq) < SEQUENCE_LENGTH:
+        if len(self._seq) < SEQUENCE_LENGTH:
             return
-        idx = self._classifier(self._seq[:SEQUENCE_LENGTH])
+        label = _classify_jz_motion(self._seq[:SEQUENCE_LENGTH])
         with self._lock:
-            if 0 <= idx < len(self._labels):
-                label = self._labels[idx]
-                # Only accept labels that are actual ASL dynamic letters
-                if label in DYNAMIC_LETTERS:
-                    self._result = label
+            self._result = label
 
 
 def change_level(level):
