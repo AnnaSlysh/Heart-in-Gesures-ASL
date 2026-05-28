@@ -364,7 +364,7 @@ footer { visibility: hidden; }
 
 /* ─── Sidebar ────────────────────────────────────────────────── */
 .stSidebar {
-    background: hsl(161, 50%, 55%);
+    background: #225D4C;
     font-family: 'Nunito', sans-serif;
 }
 .stSidebar .stMarkdown,
